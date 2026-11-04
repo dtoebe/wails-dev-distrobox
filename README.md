@@ -12,9 +12,7 @@ podman 5.8 and distrobox 1.8.
 > owner's direction. It validated each step by really running it:
 > `podman build`, `distrobox create`,
 > `wails3 doctor`, `wails3 build`, booting the emulator and installing and
-> launching the APK. Review it yourself before trusting it on your own machine;
-> no human has line-by-line reviewed the build instructions, and the
-> version numbers will drift as upstreams update.
+> launching the APK. Review it yourself before trusting it on your own machine.
 
 ## What's inside
 
