@@ -9,8 +9,8 @@ podman 5.8 and distrobox 1.8.
 > **AI-generated repository.** Every file here — the `Containerfile`, the
 > `android-dev.sh` profile, the `wails3-dev` wrapper and this README — was
 > written by an AI agent (Hermes Agent, Nous Research) working under the repo
-> owner's direction. The agent had shell access to the owner's machine and
-> validated each step by really running it: `podman build`, `distrobox create`,
+> owner's direction. It validated each step by really running it:
+> `podman build`, `distrobox create`,
 > `wails3 doctor`, `wails3 build`, booting the emulator and installing and
 > launching the APK. Review it yourself before trusting it on your own machine;
 > no human has line-by-line reviewed the build instructions, and the
