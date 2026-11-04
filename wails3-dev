@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Enter the wails3-dev distrobox with the container's own toolchain (not the
+# host's mise-installed Go/Node/wails3). With no arguments: interactive shell.
+exec distrobox enter wails3-dev --clean-path -- "$@"
