@@ -4,6 +4,10 @@
 #           --additional-flags "--device /dev/kvm --volume /run/udev:/run/udev:ro --volume /dev/bus/usb:/dev/bus/usb"
 FROM docker.io/library/ubuntu:26.10
 
+# NOTE on GOPATH below: it is build-time only. The wails3 CLI is installed into
+# /opt/gopath/bin, but at runtime /etc/profile.d/android-dev.sh overrides GOPATH
+# to a $HOME path, because Wails' cross-compile tasks bind-mount $GOPATH/pkg/mod
+# and the host engine has to see that path too (see README, "Cross-compilation").
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     TZ=America/Denver \
@@ -133,6 +137,32 @@ RUN sed -i -e 's/^hw.gpu.enabled=.*/hw.gpu.enabled=yes/' \
       "$ANDROID_USER_HOME/avd/wails_pixel7.avd/config.ini" \
  && chown -R dtoebe:1000 "$ANDROID_USER_HOME" \
  && grep -E '^hw.gpu' "$ANDROID_USER_HOME/avd/wails_pixel7.avd/config.ini"
+
+# ---- Docker CLI (client only) for Wails cross-compilation --------------------
+# The official cross-platform flow (wails3 task setup:docker, wails3 build
+# GOOS=darwin ...) shells out to `docker build` / `docker run`. There is no
+# engine inside this box and no podman-in-podman: the client talks to the HOST's
+# rootless podman API socket (distrobox exposes it at /run/user/<uid>), so the
+# containers actually run on the host. Containers still work because the box
+# mounts $HOME at the same absolute path the host sees.
+#
+# Only the static docker CLI binary is installed here - no dockerd, no containerd,
+# no docker.io apt chain, so nothing tries to start an engine in the container.
+# /etc/profile.d/docker-client.sh exports DOCKER_HOST when that socket exists.
+#
+# Host side (once): run ./host-setup.sh from the repo - it enables
+# podman.socket and points that socket's service at a containers.conf fragment
+# with userns="keep-id" and label=false, both of which Wails' cross-compile
+# bind mounts and chown step need. See README, "Cross-compilation".
+ARG DOCKER_CLI_VERSION=29.9.3
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+      | tar -xz -C /tmp docker/docker \
+ && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+ && rm -rf /tmp/docker \
+ && docker --version
+
+COPY docker-client.sh /etc/profile.d/docker-client.sh
+RUN chmod 0644 /etc/profile.d/docker-client.sh
 
 USER root
 CMD ["/bin/bash"]

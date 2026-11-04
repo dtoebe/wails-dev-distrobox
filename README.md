@@ -29,14 +29,22 @@ podman 5.8 and distrobox 1.8.
 | Android NDK | 26.3.11579264 |
 | Emulator | 37.2.13 + `system-images;android-36;google_apis;x86_64` |
 | AVD | `wails_pixel7` (pixel_7, 4 GB RAM, host GPU) |
+| Docker CLI | 29.9.3, client only → host's rootless podman API (cross-compilation) |
 
 Environment variables are set by `/etc/profile.d/android-dev.sh`
 (`ANDROID_HOME`, `ANDROID_USER_HOME`, `ANDROID_AVD_HOME`, `JAVA_HOME`, `GOPATH`,
-`GOCACHE`) so all SDK state stays inside the container.
+`GOCACHE`) so SDK state stays inside the container. The one exception is `GOPATH`:
+at runtime it is `$HOME/.local/share/wails3-dev/gopath`, a path in the shared home,
+because the cross-compilation tasks bind-mount `$GOPATH/pkg/mod` into the
+`wails-cross` container and the host engine must be able to see that exact path
+(see [Cross-compilation](#cross-compilation-the-official-wails3-flow)). The
+`wails3` CLI itself stays at `/opt/gopath/bin`, installed at image build time.
 
 ## Requirements
 
 * podman (or docker) and distrobox >= 1.8
+* the host's rootless podman API socket, for cross-compilation:
+  `systemctl --user enable --now podman.socket` (see "Cross-compilation" below)
 * `/dev/kvm` — the emulator needs it
 * `/dev/dri` — the emulator uses the host GPU (see the SwiftShader note below)
 * ~22 GB of image, plus a few GB for the emulator's userdata
@@ -85,6 +93,103 @@ wails3 task android:run:device   # physical device
 ```
 
 `wails3 doctor` should report every dependency and `No issues found`.
+
+## Cross-compilation (the official wails3 flow)
+
+Wails v3's cross-platform build drives everything through `docker build` / `docker run`
+against a `wails-cross` image (`wails3 task setup:docker`, then `wails3 build GOOS=darwin`).
+This box has **no container engine of its own** — no dockerd, no nested podman. Instead the
+image ships the static **docker CLI only**, and `/etc/profile.d/docker-client.sh` points it at
+the **host's rootless podman API socket**, which distrobox exposes at
+`/run/user/<uid>/podman/podman.sock`. The containers therefore run on the host, not in the box.
+
+### Host prerequisite (once)
+
+From this repo, on the host — no sudo needed:
+
+```sh
+./host-setup.sh
+```
+
+It does three things, all scoped to your user:
+
+1. `systemctl --user enable --now podman.socket` — the rootless podman API the
+   box's `docker` client talks to (`loginctl enable-linger "$USER"` if you want
+   that socket present when you are not logged in).
+2. Installs `~/.config/containers/wails3-dev-containers.conf`:
+   `[containers] userns="keep-id"` and `label=false`.
+3. Points that socket's service at the file with a drop-in
+   (`~/.config/systemd/user/podman.service.d/wails3-dev-containers.conf`), so
+   your normal `podman`/`distrobox` invocations are unaffected.
+
+Why those two settings exist — both are needed by the generated Taskfiles:
+
+* `userns="keep-id"`: Wails runs `docker run --rm ... alpine chown -R $(id -u):$(id -g) /app/bin`
+  after building. Under podman's default rootless mapping, container uid 1000 is a
+  *subuid*, so that chown re-owns your project's `bin/` to an unmapped uid and the
+  following `mv` fails with `Permission denied`. With `keep-id`, container uid 1000
+  *is* your uid and the chown is correct.
+* `label=false`: the cross-compile steps bind-mount the project and the Go module
+  cache from `$HOME` (`user_home_t`), which a SELinux-labelled container cannot
+  write to — the build dies with `mkdir: cannot create directory 'bin': Permission
+  denied`. Distrobox already runs this box itself with `label=disable` for the same
+  reason.
+
+Verify from inside the box — both should succeed with no extra environment:
+
+```sh
+docker info        # Server Version 5.8.x, Operating System = your host
+wails3 doctor      # docker | *Docker version ..., (cross-compilation ready)
+docker run --rm alpine id   # uid=1000(dtoebe) - proves keep-id is in effect
+```
+
+If `docker info` cannot connect, the host socket is not running or not visible:
+`DOCKER_HOST` is only exported when `/run/user/<uid>/podman/podman.sock` exists.
+To undo the host side: remove the containers.conf, remove the `podman.service.d`
+drop-in, `systemctl --user daemon-reload`, and `systemctl --user disable --now
+podman.socket`. Nothing else on the host is touched.
+
+### Build
+
+```sh
+distrobox enter wails3-dev --clean-path          # or ~/.local/bin/wails3-dev
+wails3 init -n app -t vanilla && cd app
+
+wails3 task setup:docker                         # one-time: builds the wails-cross image (~800 MB)
+
+wails3 build GOOS=darwin                         # macOS arm64
+wails3 build GOOS=darwin GOARCH=amd64            # macOS Intel
+wails3 task darwin:build:universal               # arm64 + amd64 combined
+wails3 build GOOS=linux                          # native in the box (gcc), docker not involved
+wails3 build GOOS=windows                        # native Go cross-compile, CGO off
+wails3 build GOOS=windows GOARCH=arm64
+```
+
+Output lands in `bin/`. The cross image lands in the **host's** podman store, not the box:
+
+```sh
+podman images | grep wails-cross        # run this on the host
+```
+
+### Limits worth knowing
+
+* **Projects must live under `$HOME`** (`/var/home/dtoebe/...`). `docker run -v $(pwd):/app` is
+  resolved by the host engine against the *host* filesystem, and distrobox mounts `$HOME` at the
+  same absolute path. A project under `/tmp` or `/opt` inside the box would mount the wrong (or
+  no) directory.
+* `GOOS=linux` and `GOOS=windows` builds need no docker at all (`gcc` and Go are in the box).
+  Only darwin, and windows with `CGO_ENABLED=1`, use the `wails-cross` image.
+* macOS binaries built this way are unsigned — sign them on a Mac or in CI before distributing.
+* The taskfile's precondition is literally `docker info`, so its error
+  `Docker is required for cross-compilation. Please install Docker.` means *the host socket is
+  not up*, not that the docker CLI is missing.
+* The image is tagged `wails-cross`; re-run `wails3 task setup:docker` after
+  `wails3 update build-assets` if `build/docker/Dockerfile.cross` changes.
+* Dockerfile features are limited to what podman's Docker-compatible API supports (verified with
+  the official `Dockerfile.cross`, including its `COPY <<'EOF'` heredocs). BuildKit-only syntax
+  is not available.
+* The module cache the cross build uses is `~/.local/share/wails3-dev/gopath/pkg/mod` (mounted
+  into the container), so the first build downloads modules once and later builds reuse them.
 
 ## Gotchas
 
@@ -141,3 +246,9 @@ persist in the image.
 * Android: `wails3 task android:run` cold-starts the emulator, builds
   `libwails.so` + debug APK, installs it, and the template UI renders in the
   emulator's WebView
+* cross-compilation, inside `wails3-dev` on a Fedora/Kinoite host with SELinux
+  enforcing: `wails3 task setup:docker` builds `wails-cross` through the podman
+  API, then `wails3 build GOOS=darwin` (`Mach-O 64-bit x86_64`),
+  `GOOS=darwin GOARCH=arm64` (`Mach-O 64-bit arm64`), `GOOS=windows`
+  (`PE32+ executable (GUI) x86-64`) and `GOOS=linux` (`ELF 64-bit LSB`)
+  all produce `bin/` artifacts owned by the box user
